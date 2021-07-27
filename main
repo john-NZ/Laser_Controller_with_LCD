@@ -1,0 +1,212 @@
+ /*
+  This is a library for the Adafruit 1.8" SPI display.
+  Written by Limor Fried/Ladyada for Adafruit Industries.
+  MIT license, all text above must be included in any redistribution
+*/
+//**********************************************************************************
+//include library code
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7735.h>  //This works for the 1.8 inch LCD
+
+#include <SPI.h>
+//***********************************************************************************
+//define pins of TFT screen
+#define TFT_CS     12
+#define TFT_RST    14 
+#define TFT_DC     13
+#define TFT_SCLK   22
+#define TFT_MOSI   21
+
+Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_MOSI, TFT_SCLK, TFT_RST);   //For the 1.8 inch LCD
+
+//***********************************************************************************
+
+//These are for drawing a rectangle over text so you can write over it
+int16_t  x2, y2;
+uint16_t w, h;
+
+//***********************************************************************************
+
+char    ReadTemp[6];
+char    SetTemp[6];
+char    ReadCurrent[6];
+
+//***********************************************************************************
+
+//Here the ADC readpins are defined for the laser temperature and current measurements
+
+#define SETT  34               // Set point temperature output from WTC3293 (TEC board)
+#define ACTT  39               // Actual temperature output from WTC3293 (TEC board)
+#define IMON  35               // Current output from WLD3393            (Laser driver board)
+
+//***********************************************************************************
+
+float SetTempDigitalAverage ;  // Output from SETT pin on WTC3293 in ditial counts (averaged)
+float SetTempAverage;          // Output from SETT pin on WTC3293 in degress C
+
+float ActTempDigitalAverage;   // Output from ACTT pin on WTC3293 in ditial counts (averaged)
+float ActTempAverage;          // Output from ACTT pin on WTC3293 in degress C
+
+int   ControlTempDAC = 125;           // Output from DAC pin on ESP for Temperature Control if required 
+float ControlTempfromDACinDegrees;  // Output from DAC pin on ESP for Temperature Control if required
+
+float LaserCurrentDigitalAverage;   // Output from IMON pin on WLD3393 in digital counts (averaged)
+float LaserCurrentAverage;          // Output from IMON pin on WLD3393 in mA
+
+//***********************************************************************************
+
+
+
+void setup(void) {
+  Serial.begin(115200);   //initialise serial communication at 115200 bps
+
+  //Setup LCD
+  tft.initR(INITR_BLACKTAB);                     //initialize a ST7735S chip, black tab  
+  tft.setRotation(1);                            //Rotate the screen how ever you need to
+  tft.fillScreen(ST7735_BLACK);
+  
+  //Set ADC attenuation (minimum temp 11 degrees
+  //Setup input pins for wavelength boards 
+  analogSetAttenuation(ADC_6db);    //Limits the input voltage, but improves sensitivity (what will be the effect on the photodiode monitor pin)
+  pinMode (SETT, INPUT) ;
+  pinMode (ACTT, INPUT) ;
+  pinMode (IMON, INPUT) ; 
+ 
+}
+
+void loop() {
+
+Set_Temp_Read().toCharArray(SetTemp,6);
+Act_Temp_Read().toCharArray(ReadTemp,6);
+Laser_Current_Read().toCharArray(ReadCurrent,6);  
+
+//count = millis();
+//strcount = String(count);
+//strcount.toCharArray(charcount,10);
+
+//Draw labels
+drawtext("Temp Setpoint",5,5,ST7735_WHITE);
+drawtext("C",tft.width()-10,5,ST7735_WHITE);
+
+drawtext("Read Temp",5,30,ST7735_WHITE);
+drawtext("C",tft.width()-10,30,ST7735_WHITE);
+
+drawtext("Read Current",5,55,ST7735_WHITE);
+drawtext("mA",tft.width()-20,55,ST7735_WHITE);
+
+//Draw values
+redrawtext(SetTemp,95,5,ST7735_WHITE);
+redrawtext(ReadTemp,95,30,ST7735_WHITE);
+redrawtext(ReadCurrent,95,55,ST7735_WHITE);
+
+
+delay(500); 
+  
+  
+}
+
+
+
+//Re-draw textover exisiting text
+void redrawtext(char *text, uint16_t CursorX, uint16_t CursorY, uint16_t color) {
+  tft.getTextBounds(SetTemp, CursorX, CursorY, &x2, &y2, &w, &h);
+  tft.fillRect(x2, y2, w, h, ST7735_BLACK);
+  tft.setCursor(CursorX, CursorY);
+  tft.setTextColor(color);
+  tft.setTextWrap(true);
+  tft.print(text);
+}
+
+//Draw text whaich only needs drawing once
+void drawtext(char *text, uint16_t CursorX, uint16_t CursorY, uint16_t color) {
+  tft.setCursor(CursorX, CursorY);
+  tft.setTextColor(color);
+  tft.setTextWrap(true);
+  tft.print(text);
+}
+
+
+
+
+// Average some readings from Analog pins, this collects 10 readings from an Analog pin and averages to reduce the noise a bit. 
+// Just takes in the GPIO pin number and outputs a float.
+float ReadAnalogPin ( int AnalogPin ) {
+float ReadpinAverage = 0 ;
+for (int i = 0; i < 10 ; i++) 
+  {
+ int readpin = analogRead(AnalogPin);      
+  ReadpinAverage = ReadpinAverage + readpin;
+  //delay(10);
+}
+ReadpinAverage = ReadpinAverage/10;
+return ReadpinAverage ;
+}
+
+
+// Calculate Temperature pass in a digital value, and attenuation and a bit depth  (the ADC is 12 bit, but DAC is only 8 bit)
+// This is used for the SetTemp Read and the Actual Temp Read which are 12 bit.
+// To pass in a value to Control the temp, the DAC is used which is 8-bit
+ 
+float CalculateTemperature ( float DigitalTemp, float AnalogAttenuation, int BitDepth ) {    
+
+  float a = 0.003354017;          
+  float b = 0.000256172;
+  float c = 0.000002140094300;
+  float d = -0.000000072405219000; 
+
+//The 1.9 value represents maximum input voltage
+float CalculatedVoltage = (DigitalTemp * (AnalogAttenuation / BitDepth));
+float CalculatedResistance = (CalculatedVoltage/0.0001); 
+float bTerm = b*log(CalculatedResistance/10000);
+float cTerm = c* pow(log((CalculatedResistance/10000)),2);
+float dTerm = d* pow(log((CalculatedResistance/10000)),3);
+float CalculatedTemperature = 1/(a + bTerm + cTerm + dTerm) -273.15;
+
+return CalculatedTemperature ;
+}
+
+
+///////////////Read Functions////////////////////////
+
+//This is a simpler function which calculates the Laser current in mA
+float CalculateDiodeCurrent (float LaserCurrentDigitalAverage, float AnalogAttenuation, int BitDepth) {
+float CalculatedVoltage = (LaserCurrentDigitalAverage * (AnalogAttenuation / BitDepth));
+float current = CalculatedVoltage*106; 
+// code here to calculate the current to drive the diode
+return current;
+}
+
+
+ //Calculate the Set point temperature in degrees C, it will have either been set by the trimpot on the WE board or the external voltage from the ESP32
+ String Set_Temp_Read () {
+ SetTempDigitalAverage = ReadAnalogPin(SETT);
+ SetTempAverage = CalculateTemperature(SetTempDigitalAverage,1.9,4096);
+ String SetTempAverageString = String(SetTempAverage);
+ //Serial.print("Set point temp: ");
+ //Serial.print(SetTempAverageString);
+ //Serial.print(" ");
+ //Serial.print(SetTempDigitalAverage);
+ return SetTempAverageString ;
+
+ }
+
+ //Calculate the Actual Temperature
+ String Act_Temp_Read () {
+ ActTempDigitalAverage = ReadAnalogPin(ACTT);
+ ActTempAverage = CalculateTemperature(ActTempDigitalAverage,1.9,4096);
+ String ActTempAverageString = String(ActTempAverage);
+ //Serial.print("  Read temp: ");
+// Serial.print(ActTempAverageString);
+ //Serial.print(" ");
+ //Serial.println(ActTempDigitalAverage);
+
+ return ActTempAverageString;
+ }
+ 
+ //Calculate the Laser Current 
+ String Laser_Current_Read () {
+ LaserCurrentDigitalAverage = ReadAnalogPin(IMON);
+ LaserCurrentAverage = CalculateDiodeCurrent (LaserCurrentDigitalAverage,1.9,4096);
+ String LaserCurrentAverageString = String(LaserCurrentAverage);
+ return LaserCurrentAverageString;
+ }
